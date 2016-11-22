@@ -27,30 +27,33 @@ type AbstractInterpretation s f = I.Interpretation f (Expression (Literal s))
 data PolyShape = Mixed | MultMixed
   deriving (Eq, Show)
 
-data SMTOpts =
+data SMTOpts f =
   SMTOpts { shape    :: PolyShape
-          , degree   :: Int 
+          , degree   :: Int
+          , restrict :: [f]
           , maxCoeff :: Maybe Int
           , maxConst :: Maybe Int
           , minimize :: Bool }
 
-defaultSMTOpts :: SMTOpts
+defaultSMTOpts :: SMTOpts f
 defaultSMTOpts = SMTOpts { shape = MultMixed
                          , degree = 2
+                         , restrict = []
                          , maxCoeff = Nothing
                          , maxConst = Nothing
                          , minimize = True}
 
-freshPoly :: (Solver s m) => SMTOpts -> Int -> SolverM s m (AbstractPolynomial s I.Var)
-freshPoly opts ar =
+freshPoly :: (Solver s m, Eq f) => SMTOpts f -> f -> Int -> SolverM s m (AbstractPolynomial s I.Var)
+freshPoly opts f ar =
   P.fromMonos <$> sequence [ (,) <$> freshCoeff mono <*> return (P.fromPowers mono)
                            | mono <- fromShape (shape opts)]
   where
     vars = take ar I.variables
     -- fromShape StronglyLinear = [] : [ [(v,1)] | v <- vars ]
     -- fromShape Linear = [] : [ [(v,1)] | v <- vars ]
+    fromShape _ | f `elem` restrict opts =  [] : [ [(v,1)] | v <- vars ]
     fromShape MultMixed = [ [ (v,1) | v <- ms] | ms <- subsequences vars, length ms <= degree opts ]
-    fromShape Mixed     = concat (template (degree opts)) where 
+    fromShape Mixed     = concat (template (degree opts)) where
       template 0 = [[[]]]
       template d = [ v `mult` mono | mono <- lead, v <- vars ] : ps
         where
@@ -59,7 +62,7 @@ freshPoly opts ar =
           v `mult` ((v',i) : mono)
             | v == v' = (v',i+1) : mono
             | otherwise = (v',i) : v `mult` mono
-            
+
     freshCoeff mono = do
       v <- variable <$> fresh
       assertGeq v 0
@@ -68,7 +71,7 @@ freshPoly opts ar =
       maybe (return ()) (\ ub -> assertGeq (fromIntegral ub) v) maxC
       return v
 
-interpret :: (Solver s m, Ord f, Ord v) => SMTOpts -> Term f v -> StateT (AbstractInterpretation s f) (SolverM s m) (AbstractPolynomial s v)
+interpret :: (Solver s m, Ord f, Ord v) => SMTOpts f -> Term f v -> StateT (AbstractInterpretation s f) (SolverM s m) (AbstractPolynomial s v)
 interpret _ (Var v) = return (P.variable v)
 interpret _ (Const i) = return (fromIntegral i)
 interpret opts (Plus t1 t2) = (+) <$> interpret opts t1 <*> interpret opts t2
@@ -76,12 +79,12 @@ interpret opts (Mult t1 t2) = (*) <$> interpret opts t1 <*> interpret opts t2
 interpret opts (Minus t1 t2) = (-) <$> interpret opts t1 <*> interpret opts t2
 interpret opts (Neg t) = negate <$> interpret opts t
 interpret opts (Fun f ts) = do I.apply <$> getPoly <*> mapM (interpret opts) ts where
-    ar = length ts                             
+    ar = length ts
     getPoly = do
       ainter <- get
       maybe (addPoly ainter) return (I.get ainter f ar)
     addPoly ainter = do
-      p <- lift (freshPoly opts ar)
+      p <- lift (freshPoly opts f ar)
       put (I.insert ainter f (length ts) p)
       return p
 
@@ -89,13 +92,13 @@ interpret opts (Fun f ts) = do I.apply <$> getPoly <*> mapM (interpret opts) ts 
 fromAssignment :: (Solver s m) => AbstractInterpretation s f -> SolverM s m (Interpretation f Integer)
 fromAssignment = traverse evalM
 
-solveM :: (Ord f, Ord v, Solver s m, MonadTrace String m) => Interpretation f Integer -> SMTOpts -> ConstraintSystem f v -> SolverM s m (Maybe (Interpretation f Integer))
+solveM :: (Ord f, Ord v, Solver s m, MonadTrace String m) => Interpretation f Integer -> SMTOpts f -> ConstraintSystem f v -> SolverM s m (Maybe (Interpretation f Integer))
 solveM inter opts cs = do
-  (coeffs,ainter) <- flip runStateT (I.mapInter (fmap fromIntegral) inter) $ 
+  (coeffs,ainter) <- flip runStateT (I.mapInter (fmap fromIntegral) inter) $
     forM cs $ \ c -> do
     l <- interpret opts (lhs c)
     r <- interpret opts (rhs c)
-    let coeffs = P.coefficients (l - r) 
+    let coeffs = P.coefficients (l - r)
     (lift . constraint c) `mapM` coeffs
     return coeffs
   sat <- checkSat
@@ -106,11 +109,11 @@ solveM inter opts cs = do
     constraint (_ :>=: _) d = d `assertGeq` 0
     constraint (_ :=: _) d = d `assertEq` 0
     refine coeffs ainter
-      | not (minimize opts) = fromAssignment ainter 
+      | not (minimize opts) = fromAssignment ainter
       | otherwise           = fromAssignment ainter
                               -- >>= setZero
                               >>= minimizeCoeffs 5
-          -- 
+          --
           -- forM_ bs $ \ (coeff,b) -> coeff `assertLeq` (fromIntegral b)
           -- loop 5 bs
       where
@@ -123,14 +126,14 @@ solveM inter opts cs = do
         --   if sat
         --    then fromAssignment ainter >>= setZero
         --    else pop >> return inter
-             
-        
+
+
         minimizeCoeffs 0 inter = return inter
         minimizeCoeffs n inter = do
           bs <- filter (\ (_,b) -> b > 0) <$> sequence [ (,) coeff <$> evalM coeff | coeff <- coeffs ]
           if null bs
             then return inter
-            else do 
+            else do
             forM_ bs $ \ (coeff,b) -> coeff `assertLeq` (fromIntegral b)
             assert [ GEQC (fromIntegral b) (toSolverExp (coeff + 1)) | (coeff,b) <- bs ] -- TODO; interface broken
             sat <- checkSat
@@ -138,17 +141,17 @@ solveM inter opts cs = do
               then do
                fromAssignment ainter >>= minimizeCoeffs (n-1)
               else return inter
-          
-      
-         
-smt :: (Ord f, Ord v, MonadIO m) => SMTSolver -> SMTOpts -> Processor f Integer v m
+
+
+
+smt :: (Ord f, Ord v, MonadIO m) => SMTSolver -> SMTOpts f -> Processor f Integer v m
 smt _ _ [] = return NoProgress
 smt solver opts cs = do
   getInterpretation >>= run solver >>= maybe fail success
   where
     run Z3 inter = z3 (solveM inter opts cs)
     run MiniSmt inter = miniSMT (solveM inter opts cs)
-    
+
     fail = return NoProgress
     success inter = modifyInterpretation (const inter) >> return (Progress [])
 
