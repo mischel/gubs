@@ -235,7 +235,7 @@ literal :: String -> Parser ()
 literal s = lexeme (string s) >> return ()
 
 identifier :: Parser String
-identifier = lexeme (many (try alphaNum <|> oneOf "'_/#?*+-"))
+identifier = lexeme (many1 (try alphaNum <|> oneOf "'_/#?*+-"))
 
 natural :: Parser Int
 natural = lexeme (foldl' (\a i -> a * 10 + digitToInt i) 0 <$> many1 digit)
