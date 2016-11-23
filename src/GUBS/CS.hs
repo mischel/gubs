@@ -192,13 +192,9 @@ instance (PP.Pretty f, PP.Pretty v) => PP.Pretty (Constraint f v) where
 instance {-# OVERLAPPING #-} (PP.Pretty f, PP.Pretty v) => PP.Pretty (ConstraintSystem f v) where
   pretty = PP.vcat . map PP.pretty
 
-class PrettySexp a where
-  prettySexp :: a -> PP.Doc
-
 instance (PP.Pretty f, PP.Pretty v) => PrettySexp (Term f v) where 
-  prettySexp (Var v) = ppCall "var" [PP.pretty v]
+  prettySexp (Var v) = ppSexp [ PP.text "var", PP.pretty v]
   prettySexp (Const i) = PP.integer i
-  prettySexp (Fun f []) = ppSexp [PP.pretty f, ppSexp []]
   prettySexp (Fun f ts) = ppSexp (PP.pretty f : [prettySexp ti | ti <- ts])
   prettySexp (Mult t1 t2) = ppCall "*" [t1,t2]
   prettySexp (Plus t1 t2) = ppCall "+" [t1,t2]
@@ -206,11 +202,11 @@ instance (PP.Pretty f, PP.Pretty v) => PrettySexp (Term f v) where
   prettySexp (Neg t) = ppCall "neg" [t]
 
 instance (PP.Pretty f, PP.Pretty v) => PrettySexp (Constraint f v) where
-  prettySexp (l :>=: r) = ppCall "≥" [prettySexp l, prettySexp r]
-  prettySexp (l :=: r)  = PP.pretty l PP.</> PP.text "=" PP.<+> PP.pretty r
+  prettySexp (l :>=: r) = ppCall ">=" [l, r]
+  prettySexp (l :=: r) = ppCall "=" [l, r]
 
 instance (PP.Pretty f, PP.Pretty v) => PrettySexp (ConstraintSystem f v) where
-  prettySexp = PP.vcat . map PP.pretty
+  prettySexp = PP.vcat . map prettySexp
 -- parsing
 ----------------------------------------------------------------------
 
@@ -235,7 +231,7 @@ literal :: String -> Parser ()
 literal s = lexeme (string s) >> return ()
 
 identifier :: Parser String
-identifier = lexeme (many (try alphaNum <|> oneOf "'_/#?*+-"))
+identifier = lexeme (many1 (try alphaNum <|> oneOf "'_/#?*+-"))
 
 natural :: Parser Int
 natural = lexeme (foldl' (\a i -> a * 10 + digitToInt i) 0 <$> many1 digit)
